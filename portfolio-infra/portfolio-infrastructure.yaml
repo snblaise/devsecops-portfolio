@@ -4,7 +4,7 @@ Description: DevSecOps Portfolio - S3 + CloudFront + CI/CD Pipeline (Security En
 Parameters:
   ProjectName:
     Type: String
-    Default: devsecops-portfolio
+    Default: portfolio-infra
     Description: Name of the project
 
 
@@ -18,7 +18,7 @@ Resources:
   LoggingBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub ${ProjectName}-cloudfront-logs
+      BucketName: !Sub '${AWS::AccountId}-cloudfront-logs'
       VersioningConfiguration:
         Status: Enabled
       PublicAccessBlockConfiguration:
@@ -38,7 +38,7 @@ Resources:
   WebsiteBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub ${ProjectName}-website
+      BucketName: !Sub ${AWS::AccountId}-website
       VersioningConfiguration:
         Status: Enabled
       WebsiteConfiguration:
