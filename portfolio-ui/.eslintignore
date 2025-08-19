@@ -1,0 +1,5 @@
+public/workbox-*.js
+public/_next/
+.next/
+node_modules/
+*.min.js
