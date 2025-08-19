@@ -26,7 +26,7 @@ A production-ready DevSecOps portfolio showcasing secure cloud infrastructure, a
 ## 📁 Project Structure
 
 ```
-portfolio/
+devsecops-portfolio/
 ├── cicd-pipelines/                 # CI/CD automation and deployment scripts
 ├── portfolio-infra/                # AWS CloudFormation templates
 ├── portfolio-ui/                   # Next.js portfolio application
@@ -39,12 +39,24 @@ portfolio/
 - AWS CLI configured with appropriate permissions
 - Node.js 18+ and npm installed
 - Git configured
+- **Manual S3 Bucket Creation Required**: Create an S3 bucket named `devsecoplogs` for logging
+
+#### Create Logging Bucket
+```bash
+# Create the logging bucket manually (required before infrastructure deployment)
+aws s3 mb s3://devsecoplogs --region us-east-1
+
+# Enable versioning on the logging bucket
+aws s3api put-bucket-versioning \
+  --bucket devsecoplogs \
+  --versioning-configuration Status=Enabled
+```
 
 ### 1. Deploy Infrastructure & Pipelines
 ```bash
 # Clone the project
-git clone <your-repo-url>
-cd portfolio
+git clone https://github.com/snblaise/devsecops-portfolio.git
+cd devsecops-portfolio
 
 # Deploy CI/CD pipelines first
 cd cicd-pipelines
@@ -122,6 +134,9 @@ aws cloudformation deploy \
 
 **Deploy Main Infrastructure:**
 ```bash
+# Ensure devsecoplogs bucket exists first
+aws s3 ls s3://devsecoplogs || aws s3 mb s3://devsecoplogs
+
 aws cloudformation deploy \
   --template-file portfolio-infrastructure.yaml \
   --stack-name portfolio-infrastructure \
