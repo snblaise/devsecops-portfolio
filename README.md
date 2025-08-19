@@ -168,6 +168,46 @@ cp .env.example .env.local
 # Edit .env.local with your specific configuration
 ```
 
+**Setup Git Ignore (Important):**
+```bash
+# Create .gitignore file to exclude build artifacts and dependencies
+cat > .gitignore << 'EOF'
+# Dependencies
+node_modules/
+/.pnp
+.pnp.js
+
+# Testing
+/coverage
+
+# Next.js
+/.next/
+/out/
+
+# Production
+/build
+
+# Misc
+.DS_Store
+*.pem
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local env files
+.env*.local
+
+# Vercel
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+EOF
+```
+
 **Run Security Checks:**
 ```bash
 npm run security-audit
