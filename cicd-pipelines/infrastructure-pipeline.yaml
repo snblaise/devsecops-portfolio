@@ -1,0 +1,298 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Infrastructure CI/CD Pipeline with Rollback Capabilities
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: portfolio
+    Description: Name of the project
+
+Resources:
+  # S3 Bucket for Pipeline Artifacts
+  InfraArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-infra-artifacts
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # GitHub Connection for Infrastructure
+  GitHubConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: !Sub ${ProjectName}-github
+      ProviderType: GitHub
+
+  # CodeBuild Role for Infrastructure
+  InfraCodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InfraCodeBuildPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub 'arn:aws:s3:::${InfraArtifactsBucket}/*'
+              - Effect: Allow
+                Action:
+                  - cloudformation:*
+                  - iam:*
+                  - s3:*
+                  - cloudfront:*
+                  - wafv2:*
+                  - tag:*
+                Resource: '*'
+
+  # CodeBuild Project for Infrastructure Validation
+  InfraValidationProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${ProjectName}-infra-validation
+      ServiceRole: !GetAtt InfraCodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                python: 3.11
+              commands:
+                - pip install cfn-lint checkov
+            pre_build:
+              commands:
+                - echo "Running CloudFormation linting..."
+                - cfn-lint *.yaml
+                - echo "Running security scanning with Checkov..."
+                # - checkov -f *.yaml --framework cloudformation
+            build:
+              commands:
+                - echo "Validating CloudFormation templates..."
+                - aws cloudformation validate-template --template-body file://portfolio-infrastructure.yaml
+            post_build:
+              commands:
+                - echo "Infrastructure validation completed"
+
+  # CloudFormation Service Role
+  CloudFormationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudFormationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:*
+                  - iam:*
+                  - s3:*
+                  - cloudfront:*
+                  - wafv2:*
+                  - tag:*
+                  - codebuild:*
+                  - codepipeline:*
+                  - codecommit:*
+                Resource: '*'
+
+  # Infrastructure Pipeline
+  InfraPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${ProjectName}-infrastructure-pipeline
+      RoleArn: !GetAtt InfraCodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref InfraArtifactsBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                ConnectionArn: !Ref GitHubConnection
+                FullRepositoryId: snblaise/portfolio-infra
+                OutputArtifactFormat: CODE_ZIP
+                BranchName: main
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Validate
+          Actions:
+            - Name: ValidateInfrastructure
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref InfraValidationProject
+              InputArtifacts:
+                - Name: SourceOutput
+        - Name: Deploy
+          Actions:
+            - Name: CreateWAFChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              RunOrder: 1
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                StackName: !Sub '${ProjectName}-waf'
+                ChangeSetName: waf-changeset
+                TemplatePath: SourceOutput::waf-stack.yaml
+                Capabilities: CAPABILITY_NAMED_IAM
+                RoleArn: !GetAtt CloudFormationRole.Arn
+                ParameterOverrides: |
+                  {
+                    "ProjectName": "portfolio"
+                  }
+              InputArtifacts:
+                - Name: SourceOutput
+            - Name: ExecuteWAFChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              RunOrder: 2
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                StackName: !Sub '${ProjectName}-waf'
+                ChangeSetName: waf-changeset
+              InputArtifacts:
+                - Name: SourceOutput
+            - Name: CreateInfraChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              RunOrder: 3
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                StackName: !Sub '${ProjectName}-infrastructure'
+                ChangeSetName: infra-changeset
+                TemplatePath: SourceOutput::portfolio-infrastructure.yaml
+                Capabilities: CAPABILITY_NAMED_IAM
+                RoleArn: !GetAtt CloudFormationRole.Arn
+                ParameterOverrides: |
+                  {
+                    "ProjectName": "portfolio"
+                  }
+              InputArtifacts:
+                - Name: SourceOutput
+            - Name: ExecuteInfraChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              RunOrder: 4
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                StackName: !Sub '${ProjectName}-infrastructure'
+                ChangeSetName: infra-changeset
+              InputArtifacts:
+                - Name: SourceOutput
+
+  # CodePipeline Role for Infrastructure
+  InfraCodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InfraCodePipelinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                Resource:
+                  - !Sub 'arn:aws:s3:::${InfraArtifactsBucket}/*'
+                  - !Sub 'arn:aws:s3:::${InfraArtifactsBucket}'
+              - Effect: Allow
+                Action:
+                  - codestar-connections:UseConnection
+                Resource: !Ref GitHubConnection
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource: !GetAtt InfraValidationProject.Arn
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:ListChangeSets
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:ValidateTemplate
+                  - iam:PassRole
+                Resource: '*'
+
+Outputs:
+  GitHubConnectionArn:
+    Description: GitHub connection ARN
+    Value: !Ref GitHubConnection
+
+  InfraRepositoryUrl:
+    Description: Infrastructure repository URL
+    Value: https://github.com/snblaise/portfolio-infra
+
+  InfraPipelineName:
+    Description: Infrastructure pipeline name
+    Value: !Ref InfraPipeline

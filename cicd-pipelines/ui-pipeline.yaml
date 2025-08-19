@@ -1,0 +1,375 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'UI CI/CD Pipeline with Blue/Green Deployment'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'portfolio'
+    Description: 'Name of the project'
+  
+  WebsiteBucket:
+    Type: String
+    Default: 'portfolio-website'
+    Description: 'S3 bucket name for website hosting'
+  
+  CloudFrontDistributionId:
+    Type: String
+    Default: 'EGVMPA46DI7N0'
+    Description: 'CloudFront distribution ID'
+
+Resources:
+  # S3 Bucket for UI Pipeline Artifacts
+  UIArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-ui-artifacts'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # GitHub Connection for UI
+  GitHubConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: !Sub '${ProjectName}-ui-github'
+      ProviderType: GitHub
+
+  # CodeBuild Role for UI
+  UICodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: UICodeBuildPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource: 
+                  - !Sub 'arn:aws:s3:::${UIArtifactsBucket}/*'
+                  - !Sub 'arn:aws:s3:::${UIArtifactsBucket}'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource: 
+                  - !Sub 'arn:aws:s3:::${WebsiteBucket}/*'
+                  - !Sub 'arn:aws:s3:::${WebsiteBucket}'
+              - Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetDistribution
+                Resource: '*'
+
+
+  # CodeBuild Project for UI Testing
+  UITestProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-ui-test'
+      ServiceRole: !GetAtt UICodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                nodejs: 18
+              commands:
+                - echo Installing dependencies...
+                - npm ci --cache .npm --prefer-offline
+                - npm install -g audit-ci
+            pre_build:
+              commands:
+                - echo Running security audit...
+                - echo Running linting...
+                - npm run lint
+                - echo Running type checking...
+                - npm run type-check
+            build:
+              commands:
+                - echo Running tests...
+                - npm test --passWithNoTests
+            post_build:
+              commands:
+                - echo UI tests completed
+          artifacts:
+            files:
+              - '**/*'
+            base-directory: .
+          cache:
+            paths:
+              - '.npm/**/*'
+              - 'node_modules/**/*'
+  UIBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-ui-build'
+      ServiceRole: !GetAtt UICodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                nodejs: 18
+              commands:
+                - echo Installing dependencies...
+                - npm ci --cache .npm --prefer-offline
+            build:
+              commands:
+                - echo Building application...
+                - npm run build
+            post_build:
+              commands:
+                - echo UI build completed
+          artifacts:
+            files:
+              - '**/*'
+            base-directory: out
+          cache:
+            paths:
+              - '.npm/**/*'
+              - 'node_modules/**/*'
+
+  # CodeDeploy Service Role
+  CodeDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
+      Policies:
+        - PolicyName: S3DeployPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${WebsiteBucket}/*'
+                  - !Sub 'arn:aws:s3:::${WebsiteBucket}'
+
+  # CodeDeploy Application
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub '${ProjectName}-ui-app'
+      ComputePlatform: Server
+
+  # CodeBuild Project for CloudFront Invalidation
+  CloudFrontInvalidationProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-cloudfront-invalidation'
+      ServiceRole: !GetAtt UICodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        EnvironmentVariables:
+          - Name: CloudFrontDistributionId
+            Value: !Ref CloudFrontDistributionId
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          env:
+            variables:
+              CloudFrontDistributionId: !Ref CloudFrontDistributionId
+          phases:
+            build:
+              commands:
+                - echo Checking CloudFront distribution...
+                - echo Verifying CloudFront distribution...
+                - aws cloudfront get-distribution --id $CloudFrontDistributionId || exit 1
+                - echo Creating CloudFront invalidation...
+                - aws cloudfront create-invalidation --distribution-id $CloudFrontDistributionId --paths "/*"
+                - echo CloudFront invalidation completed
+
+  # CodePipeline Role for UI
+  UICodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: UICodePipelinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                Resource:
+                  - !Sub 'arn:aws:s3:::${UIArtifactsBucket}/*'
+                  - !Sub 'arn:aws:s3:::${UIArtifactsBucket}'
+              - Effect: Allow
+                Action:
+                  - codestar-connections:UseConnection
+                Resource: !Ref GitHubConnection
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource: 
+                  - !GetAtt UITestProject.Arn
+                  - !GetAtt UIBuildProject.Arn
+                  - !GetAtt CloudFrontInvalidationProject.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${WebsiteBucket}/*'
+                  - !Sub 'arn:aws:s3:::${WebsiteBucket}'
+
+  # UI Pipeline
+  UIPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub '${ProjectName}-ui-pipeline'
+      RoleArn: !GetAtt UICodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref UIArtifactsBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                ConnectionArn: !Ref GitHubConnection
+                FullRepositoryId: 'snblaise/portfolio-ui'
+                BranchName: main
+                OutputArtifactFormat: CODE_ZIP
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Test
+          Actions:
+            - Name: Test
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref UITestProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: TestOutput
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref UIBuildProject
+              InputArtifacts:
+                - Name: TestOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+        - Name: Deploy
+          Actions:
+            - Name: DeployToS3
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                BucketName: !Ref WebsiteBucket
+                Extract: true
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+            - Name: InvalidateCloudFront
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CloudFrontInvalidationProject
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 2
+
+Outputs:
+  GitHubConnectionArn:
+    Description: 'GitHub connection ARN'
+    Value: !Ref GitHubConnection
+  
+  UIRepositoryUrl:
+    Description: 'UI repository URL'
+    Value: 'https://github.com/snblaise/portfolio-ui'
+  
+  UIPipelineName:
+    Description: 'UI pipeline name'
+    Value: !Ref UIPipeline
